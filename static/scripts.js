@@ -70,6 +70,7 @@ let epgTimer = null;
 let activeChannelName = null;
 let activeChannelId = null;
 let countryLoadToken = 0;
+let playbackToken = 0;
 
 /* ✅ autoplay solo all’avvio */
 let initialAutoplayDone = false;
@@ -328,14 +329,14 @@ function updateQualityFromHlsLevel(levelObj) {
   showQualityBadge(text, { key, iconClass: qualityIconForKey(key) });
 }
 
-function attachHlsQualityListeners(nameForFallback) {
-  if (!hlsInst) return;
+function attachHlsQualityListeners(nameForFallback, instance = hlsInst, onFatal = null) {
+  if (!instance) return;
 
-  hlsInst.on(Hls.Events.MANIFEST_PARSED, () => {
-  if (hlsInst.levels && hlsInst.levels.length) {
-    const best = hlsInst.levels.reduce(
+  instance.on(Hls.Events.MANIFEST_PARSED, () => {
+  if (instance.levels && instance.levels.length) {
+    const best = instance.levels.reduce(
       (a, b) => ((b.height || 0) > (a.height || 0) ? b : a),
-      hlsInst.levels[0]
+      instance.levels[0]
     );
     updateQualityFromHlsLevel(best);
   } else {
@@ -344,14 +345,15 @@ function attachHlsQualityListeners(nameForFallback) {
   }
 });
 
-  hlsInst.on(Hls.Events.LEVEL_SWITCHED, (_, data) => {
-    const lvl = hlsInst.levels?.[data.level];
+  instance.on(Hls.Events.LEVEL_SWITCHED, (_, data) => {
+    const lvl = instance.levels?.[data.level];
     updateQualityFromHlsLevel(lvl);
   });
 
-  hlsInst.on(Hls.Events.ERROR, (_, data) => {
+  instance.on(Hls.Events.ERROR, (_, data) => {
     detectQualityFromName(nameForFallback);
     if (data?.fatal) {
+      if (onFatal?.(data)) return;
       const message = data.type === Hls.ErrorTypes.NETWORK_ERROR
         ? "Errore di rete durante il caricamento del flusso HLS."
         : "Il flusso HLS non può essere decodificato.";
@@ -670,6 +672,7 @@ function requestVideoPlayback() {
 
 function play(url, name, tvgId = "", streamHint = "") {
   url = String(url || ""); /* ✅ FIX: evita crash su includes */
+  const thisPlayback = ++playbackToken;
 
   showQualityBadge("");
   setPlayerStatus("");
@@ -714,6 +717,9 @@ function play(url, name, tvgId = "", streamHint = "") {
   const playbackUrl = streamType === "hls" && !isLocalStreamProxy
     ? `/api/stream?url=${encodeURIComponent(url)}`
     : url;
+  const directUrl = isLocalStreamProxy
+    ? new URL(url, location.href).searchParams.get("url") || url
+    : url;
 
   if (streamType === "dash") {
     if (typeof dashjs === "undefined") {
@@ -725,18 +731,64 @@ function play(url, name, tvgId = "", streamHint = "") {
     attachDashQualityListeners(name);
   } else if (streamType === "hls") {
     if (typeof Hls !== "undefined" && Hls.isSupported()) {
-      hlsInst = new Hls();
-      hlsInst.loadSource(playbackUrl);
-      hlsInst.attachMedia(el.video);
-      attachHlsQualityListeners(name);
+      const startHls = (source, mayTryDirect) => {
+        if (thisPlayback !== playbackToken) return;
 
-      hlsInst.on(Hls.Events.MANIFEST_PARSED, () => {
-        requestVideoPlayback();
-      });
+        const instance = new Hls();
+        hlsInst = instance;
+        instance.loadSource(source);
+        instance.attachMedia(el.video);
+        attachHlsQualityListeners(name, instance, data => {
+          if (thisPlayback !== playbackToken) return true;
+
+          if (mayTryDirect && directUrl !== source) {
+            const status = data?.response?.code;
+            setPlayerStatus(status
+              ? `Relay HTTP ${status}: provo il collegamento diretto…`
+              : "Relay non disponibile: provo il collegamento diretto…");
+            try { instance.destroy(); } catch {}
+            if (hlsInst === instance) hlsInst = null;
+            queueMicrotask(() => startHls(directUrl, false));
+            return true;
+          }
+
+          const status = data?.response?.code;
+          setPlayerStatus(status
+            ? `Canale non disponibile (HTTP ${status}) anche tramite collegamento diretto.`
+            : "Canale non disponibile: anche il collegamento diretto non ha funzionato.",
+          "error");
+          return true;
+        });
+
+        instance.on(Hls.Events.MANIFEST_PARSED, () => {
+          if (thisPlayback === playbackToken) requestVideoPlayback();
+        });
+      };
+
+      startHls(playbackUrl, true);
     } else {
-      el.video.src = playbackUrl;
-      detectQualityFromName(name);
-      requestVideoPlayback();
+      const startNativeHls = (source, mayTryDirect) => {
+        if (thisPlayback !== playbackToken) return;
+
+        el.video.addEventListener("error", () => {
+          if (thisPlayback !== playbackToken) return;
+          if (mayTryDirect && directUrl !== source) {
+            setPlayerStatus("Relay non disponibile: provo il collegamento diretto…");
+            startNativeHls(directUrl, false);
+          } else {
+            setPlayerStatus(
+              "Canale non disponibile: anche il collegamento diretto non ha funzionato.",
+              "error"
+            );
+          }
+        }, { once: true });
+
+        el.video.src = source;
+        detectQualityFromName(name);
+        requestVideoPlayback();
+      };
+
+      startNativeHls(playbackUrl, true);
     }
   } else {
     el.video.src = playbackUrl;
