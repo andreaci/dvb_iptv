@@ -1,0 +1,96 @@
+name: Release self-contained application
+
+on:
+  push:
+    branches:
+      - "**"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  detect-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.value }}
+      should-release: ${{ steps.version.outputs.found }}
+    steps:
+      - name: Read version from commit message
+        id: version
+        env:
+          COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+        shell: bash
+        run: |
+          version="$(printf '%s\n' "$COMMIT_MESSAGE" | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | head -n 1 || true)"
+          if [[ -n "$version" ]]; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+            echo "value=$version" >> "$GITHUB_OUTPUT"
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            echo "No semantic version found; release skipped."
+          fi
+
+  release:
+    needs: detect-version
+    if: needs.detect-version.outputs.should-release == 'true'
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.detect-version.outputs.version }}
+      ARCHIVE_NAME: DvbServer-${{ needs.detect-version.outputs.version }}-win-x64.zip
+    steps:
+      - name: Check out the release commit
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Ensure the tag does not already exist
+        shell: bash
+        run: |
+          if git ls-remote --exit-code --tags origin "refs/tags/$VERSION" >/dev/null 2>&1; then
+            echo "Tag $VERSION already exists." >&2
+            exit 1
+          fi
+
+      - name: Publish self-contained Windows application
+        shell: bash
+        run: |
+          dotnet publish DvbServer.csproj \
+            --configuration Release \
+            --runtime win-x64 \
+            --self-contained true \
+            -p:PublishSingleFile=true \
+            -p:DebugType=None \
+            --output release-package
+
+      - name: Create ready-to-run archive
+        shell: bash
+        run: |
+          cd release-package
+          zip -r "../$ARCHIVE_NAME" .
+
+      - name: Create and push tag
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$VERSION" -m "Release $VERSION" "$GITHUB_SHA"
+          git push origin "$VERSION"
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          gh release create "$VERSION" "$ARCHIVE_NAME" \
+            --title "$VERSION" \
+            --generate-notes \
+            --verify-tag
