@@ -37,7 +37,7 @@ jobs:
   release:
     needs: detect-version
     if: needs.detect-version.outputs.should-release == 'true'
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     env:
       VERSION: ${{ needs.detect-version.outputs.version }}
       ARCHIVE_NAME: DvbServer-${{ needs.detect-version.outputs.version }}-win-x64.zip
@@ -53,44 +53,52 @@ jobs:
           dotnet-version: 10.0.x
 
       - name: Ensure the tag does not already exist
-        shell: bash
+        shell: pwsh
         run: |
-          if git ls-remote --exit-code --tags origin "refs/tags/$VERSION" >/dev/null 2>&1; then
-            echo "Tag $VERSION already exists." >&2
-            exit 1
-          fi
+          git ls-remote --exit-code --tags origin "refs/tags/$env:VERSION" | Out-Null
+          if ($LASTEXITCODE -eq 0) {
+            throw "Tag $env:VERSION already exists."
+          }
 
       - name: Publish self-contained Windows application
-        shell: bash
+        shell: pwsh
         run: |
-          dotnet publish DvbServer.csproj \
-            --configuration Release \
-            --runtime win-x64 \
-            --self-contained true \
-            -p:PublishSingleFile=true \
-            -p:DebugType=None \
+          dotnet publish DvbServer.csproj `
+            --configuration Release `
+            --runtime win-x64 `
+            --self-contained true `
+            -p:PublishSingleFile=true `
+            -p:DebugType=None `
             --output release-package
+          if ($LASTEXITCODE -ne 0) {
+            throw "dotnet publish failed with exit code $LASTEXITCODE."
+          }
 
       - name: Create ready-to-run archive
-        shell: bash
+        shell: pwsh
         run: |
-          cd release-package
-          zip -r "../$ARCHIVE_NAME" .
+          Compress-Archive -Path "release-package\*" -DestinationPath $env:ARCHIVE_NAME -Force
 
       - name: Create and push tag
-        shell: bash
+        shell: pwsh
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -a "$VERSION" -m "Release $VERSION" "$GITHUB_SHA"
-          git push origin "$VERSION"
+          git tag -a $env:VERSION -m "Release $env:VERSION" $env:GITHUB_SHA
+          git push origin $env:VERSION
+          if ($LASTEXITCODE -ne 0) {
+            throw "Could not push tag $env:VERSION."
+          }
 
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-        shell: bash
+        shell: pwsh
         run: |
-          gh release create "$VERSION" "$ARCHIVE_NAME" \
-            --title "$VERSION" \
-            --generate-notes \
+          gh release create $env:VERSION $env:ARCHIVE_NAME `
+            --title $env:VERSION `
+            --generate-notes `
             --verify-tag
+          if ($LASTEXITCODE -ne 0) {
+            throw "Could not create GitHub Release $env:VERSION."
+          }
