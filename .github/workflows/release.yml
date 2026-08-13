@@ -47,11 +47,6 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Set up .NET 10
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: 10.0.x
-
       - name: Detect existing tag
         id: tag
         shell: pwsh
@@ -78,6 +73,52 @@ jobs:
             throw "Could not check out tag $env:VERSION."
           }
 
+      - name: Set up the pinned .NET SDK
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.302
+          architecture: x64
+
+      - name: Pin and verify the selected SDK
+        shell: pwsh
+        run: |
+          @'
+          {
+            "sdk": {
+              "version": "10.0.302",
+              "rollForward": "disable",
+              "allowPrerelease": false
+            }
+          }
+          '@ | Set-Content -LiteralPath global.json -Encoding utf8
+
+          @'
+          <?xml version="1.0" encoding="utf-8"?>
+          <configuration>
+            <packageSources>
+              <clear />
+              <add key="nuget.org" value="https://api.nuget.org/v3/index.json" protocolVersion="3" />
+            </packageSources>
+          </configuration>
+          '@ | Set-Content -LiteralPath NuGet.Config -Encoding utf8
+
+          $selectedSdk = dotnet --version
+          if ($LASTEXITCODE -ne 0 -or $selectedSdk.Trim() -ne "10.0.302") {
+            throw "Expected .NET SDK 10.0.302, but selected '$selectedSdk'."
+          }
+          dotnet --info
+
+      - name: Restore Windows runtime dependencies
+        shell: pwsh
+        run: |
+          dotnet restore DvbServer.csproj `
+            --runtime win-x64 `
+            --verbosity normal `
+            --configfile NuGet.Config
+          if ($LASTEXITCODE -ne 0) {
+            throw "dotnet restore failed with exit code $LASTEXITCODE."
+          }
+
       - name: Publish self-contained Windows application
         shell: pwsh
         run: |
@@ -85,6 +126,7 @@ jobs:
             --configuration Release `
             --runtime win-x64 `
             --self-contained true `
+            --no-restore `
             -p:PublishSingleFile=true `
             -p:DebugType=None `
             --output release-package
