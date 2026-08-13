@@ -52,12 +52,30 @@ jobs:
         with:
           dotnet-version: 10.0.x
 
-      - name: Ensure the tag does not already exist
+      - name: Detect existing tag
+        id: tag
         shell: pwsh
         run: |
-          git ls-remote --exit-code --tags origin "refs/tags/$env:VERSION" | Out-Null
-          if ($LASTEXITCODE -eq 0) {
-            throw "Tag $env:VERSION already exists."
+          $PSNativeCommandUseErrorActionPreference = $false
+          $remoteTag = @(git ls-remote --tags origin "refs/tags/$env:VERSION")
+          if ($LASTEXITCODE -ne 0) {
+            throw "Could not query tags from origin."
+          }
+          $exists = $remoteTag.Count -gt 0
+          "exists=$($exists.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+          if ($exists) {
+            Write-Host "Tag $env:VERSION exists; its release asset will be rebuilt."
+          } else {
+            Write-Host "Tag $env:VERSION does not exist and will be created."
+          }
+
+      - name: Build the existing tagged commit
+        if: steps.tag.outputs.exists == 'true'
+        shell: pwsh
+        run: |
+          git checkout --detach "refs/tags/$env:VERSION"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Could not check out tag $env:VERSION."
           }
 
       - name: Publish self-contained Windows application
@@ -80,6 +98,7 @@ jobs:
           Compress-Archive -Path "release-package\*" -DestinationPath $env:ARCHIVE_NAME -Force
 
       - name: Create and push tag
+        if: steps.tag.outputs.exists == 'false'
         shell: pwsh
         run: |
           git config user.name "github-actions[bot]"
@@ -95,10 +114,18 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         shell: pwsh
         run: |
-          gh release create $env:VERSION $env:ARCHIVE_NAME `
-            --title $env:VERSION `
-            --generate-notes `
-            --verify-tag
+          $PSNativeCommandUseErrorActionPreference = $false
+          gh release view $env:VERSION *> $null
+          $releaseExists = $LASTEXITCODE -eq 0
+
+          if ($releaseExists) {
+            gh release upload $env:VERSION $env:ARCHIVE_NAME --clobber
+          } else {
+            gh release create $env:VERSION $env:ARCHIVE_NAME `
+              --title $env:VERSION `
+              --generate-notes `
+              --verify-tag
+          }
           if ($LASTEXITCODE -ne 0) {
-            throw "Could not create GitHub Release $env:VERSION."
+            throw "Could not publish GitHub Release $env:VERSION."
           }

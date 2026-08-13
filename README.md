@@ -118,10 +118,12 @@ For a matching commit, the workflow:
 
 1. Builds a self-contained `win-x64` application on a Windows runner.
 2. Creates `DvbServer-v1.2.3-win-x64.zip`.
-3. Creates and pushes the `v1.2.3` tag.
+3. Creates and pushes the `v1.2.3` tag when it does not exist.
 4. Creates a GitHub Release and attaches the ZIP.
 
-The version tag must not already exist. A commit without `vMAJOR.MINOR.PATCH` skips the release job.
+If the tag already exists, the workflow checks out that tagged commit, rebuilds it, and replaces the ZIP attached to its existing release. If the tag exists without a release, the workflow creates one. GitHub permits only one release for a given tag, so reruns update that release instead of creating a duplicate.
+
+A commit without `vMAJOR.MINOR.PATCH` skips the release job.
 
 ## Project layout
 
