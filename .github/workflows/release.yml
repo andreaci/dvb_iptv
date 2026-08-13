@@ -17,6 +17,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.value }}
+      tag: ${{ steps.version.outputs.tag }}
       should-release: ${{ steps.version.outputs.found }}
     steps:
       - name: Read version from commit message
@@ -28,7 +29,8 @@ jobs:
           version="$(printf '%s\n' "$COMMIT_MESSAGE" | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | head -n 1 || true)"
           if [[ -n "$version" ]]; then
             echo "found=true" >> "$GITHUB_OUTPUT"
-            echo "value=$version" >> "$GITHUB_OUTPUT"
+            echo "tag=$version" >> "$GITHUB_OUTPUT"
+            echo "value=${version#v}" >> "$GITHUB_OUTPUT"
           else
             echo "found=false" >> "$GITHUB_OUTPUT"
             echo "No semantic version found; release skipped."
@@ -39,8 +41,9 @@ jobs:
     if: needs.detect-version.outputs.should-release == 'true'
     runs-on: windows-latest
     env:
-      VERSION: ${{ needs.detect-version.outputs.version }}
-      ARCHIVE_NAME: DvbServer-${{ needs.detect-version.outputs.version }}-win-x64.zip
+      RELEASE_TAG: ${{ needs.detect-version.outputs.tag }}
+      RELEASE_VERSION: ${{ needs.detect-version.outputs.version }}
+      ARCHIVE_NAME: DvbServer-${{ needs.detect-version.outputs.tag }}-win-x64.zip
     steps:
       - name: Check out the release commit
         uses: actions/checkout@v4
@@ -52,25 +55,25 @@ jobs:
         shell: pwsh
         run: |
           $PSNativeCommandUseErrorActionPreference = $false
-          $remoteTag = @(git ls-remote --tags origin "refs/tags/$env:VERSION")
+          $remoteTag = @(git ls-remote --tags origin "refs/tags/$env:RELEASE_TAG")
           if ($LASTEXITCODE -ne 0) {
             throw "Could not query tags from origin."
           }
           $exists = $remoteTag.Count -gt 0
           "exists=$($exists.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
           if ($exists) {
-            Write-Host "Tag $env:VERSION exists; its release asset will be rebuilt."
+            Write-Host "Tag $env:RELEASE_TAG exists; its release asset will be rebuilt."
           } else {
-            Write-Host "Tag $env:VERSION does not exist and will be created."
+            Write-Host "Tag $env:RELEASE_TAG does not exist and will be created."
           }
 
       - name: Build the existing tagged commit
         if: steps.tag.outputs.exists == 'true'
         shell: pwsh
         run: |
-          git checkout --detach "refs/tags/$env:VERSION"
+          git checkout --detach "refs/tags/$env:RELEASE_TAG"
           if ($LASTEXITCODE -ne 0) {
-            throw "Could not check out tag $env:VERSION."
+            throw "Could not check out tag $env:RELEASE_TAG."
           }
 
       - name: Set up the pinned .NET SDK
@@ -114,7 +117,8 @@ jobs:
           dotnet restore DvbServer.csproj `
             --runtime win-x64 `
             --verbosity normal `
-            --configfile NuGet.Config
+            --configfile NuGet.Config `
+            -p:Version=$env:RELEASE_VERSION
           if ($LASTEXITCODE -ne 0) {
             throw "dotnet restore failed with exit code $LASTEXITCODE."
           }
@@ -127,6 +131,7 @@ jobs:
             --runtime win-x64 `
             --self-contained true `
             --no-restore `
+            -p:Version=$env:RELEASE_VERSION `
             -p:PublishSingleFile=true `
             -p:DebugType=None `
             --output release-package
@@ -145,10 +150,10 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -a $env:VERSION -m "Release $env:VERSION" $env:GITHUB_SHA
-          git push origin $env:VERSION
+          git tag -a $env:RELEASE_TAG -m "Release $env:RELEASE_TAG" $env:GITHUB_SHA
+          git push origin $env:RELEASE_TAG
           if ($LASTEXITCODE -ne 0) {
-            throw "Could not push tag $env:VERSION."
+            throw "Could not push tag $env:RELEASE_TAG."
           }
 
       - name: Publish GitHub Release
@@ -157,17 +162,17 @@ jobs:
         shell: pwsh
         run: |
           $PSNativeCommandUseErrorActionPreference = $false
-          gh release view $env:VERSION *> $null
+          gh release view $env:RELEASE_TAG *> $null
           $releaseExists = $LASTEXITCODE -eq 0
 
           if ($releaseExists) {
-            gh release upload $env:VERSION $env:ARCHIVE_NAME --clobber
+            gh release upload $env:RELEASE_TAG $env:ARCHIVE_NAME --clobber
           } else {
-            gh release create $env:VERSION $env:ARCHIVE_NAME `
-              --title $env:VERSION `
+            gh release create $env:RELEASE_TAG $env:ARCHIVE_NAME `
+              --title $env:RELEASE_TAG `
               --generate-notes `
               --verify-tag
           }
           if ($LASTEXITCODE -ne 0) {
-            throw "Could not publish GitHub Release $env:VERSION."
+            throw "Could not publish GitHub Release $env:RELEASE_TAG."
           }
